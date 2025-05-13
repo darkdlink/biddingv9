@@ -32,7 +32,7 @@ Route::post('/sidebar/toggle', function () {
 })->middleware('auth')->name('sidebar.toggle');
 
 // Rotas protegidas por autenticação
-Route::middleware(['auth:sanctum'])->group(function () {
+Route::middleware(['auth'])->group(function () {
     // Dashboard do usuário
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
@@ -79,3 +79,5 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Rota para segmentos
     Route::resource('segmentos', SegmentoController::class)->middleware('can:manage-segmento');
 });
+
+

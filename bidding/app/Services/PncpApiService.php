@@ -4,7 +4,6 @@ namespace App\Services;
 
 use GuzzleHttp\Client;
 use App\Models\Licitacao;
-use App\Models\Segmento;
 use Carbon\Carbon;
 use Exception;
 use Illuminate\Support\Facades\Log;
@@ -87,6 +86,8 @@ class PncpApiService
             }
 
             // Tenta processar as licitações dentro de uma transação
+            // Aqui está o problema: Você está chamando processarLicitacoes() mas o método não existe
+            // Vamos implementá-lo:
             $processados = $this->processarLicitacoes($data['data']);
 
             Log::info('Licitações processadas: ' . $processados);
@@ -98,7 +99,8 @@ class PncpApiService
                     'totalRegistros' => $data['totalRegistros'] ?? 0,
                     'totalPaginas' => $data['totalPaginas'] ?? 0,
                     'paginaAtual' => $queryParams['pagina']
-                ]
+                ],
+                'licitacoes_processadas' => $processados
             ];
         } catch (Exception $e) {
             Log::error('ERRO CRÍTICO ao consultar licitações: ' . $e->getMessage());
@@ -106,9 +108,158 @@ class PncpApiService
             throw $e;
         }
     }
-    // ...
 
-    // Adicionar método para analisar relevância automática de licitações
+    // Implementação do método processarLicitacoes que estava faltando
+    protected function processarLicitacoes($licitacoes)
+    {
+        $contador = 0;
+
+        try {
+            // Usar transação para garantir integridade
+            DB::beginTransaction();
+
+            Log::info('Iniciando processamento de ' . count($licitacoes) . ' licitações');
+
+            foreach ($licitacoes as $licitacao) {
+                try {
+                    // Verifica se a licitação já existe no banco
+                    $numeroControle = $licitacao['numeroControlePNCP'] ?? null;
+
+                    if (empty($numeroControle)) {
+                        Log::warning('Licitação sem número de controle. Pulando.');
+                        continue;
+                    }
+
+                    $existingLicitacao = Licitacao::where('numero_controle_pncp', $numeroControle)->first();
+
+                    if (!$existingLicitacao) {
+                        Log::info('Processando nova licitação: ' . $numeroControle);
+
+                        // Tratamento seguro dos dados aninhados
+                        $orgao = isset($licitacao['orgaoEntidade']) && isset($licitacao['orgaoEntidade']['razaoSocial'])
+                            ? $licitacao['orgaoEntidade']['razaoSocial'] : '';
+
+                        $unidade = isset($licitacao['unidadeOrgao']) && isset($licitacao['unidadeOrgao']['nomeUnidade'])
+                            ? $licitacao['unidadeOrgao']['nomeUnidade'] : '';
+
+                        $uf = isset($licitacao['unidadeOrgao']) && isset($licitacao['unidadeOrgao']['ufSigla'])
+                            ? $licitacao['unidadeOrgao']['ufSigla'] : '';
+
+                        $municipio = isset($licitacao['unidadeOrgao']) && isset($licitacao['unidadeOrgao']['municipioNome'])
+                            ? $licitacao['unidadeOrgao']['municipioNome'] : '';
+
+                        $cnpj = isset($licitacao['orgaoEntidade']) && isset($licitacao['orgaoEntidade']['cnpj'])
+                            ? $licitacao['orgaoEntidade']['cnpj'] : '';
+
+                        // Tratamento seguro das datas
+                        try {
+                            $dataInclusao = !empty($licitacao['dataInclusao']) ? Carbon::parse($licitacao['dataInclusao']) : null;
+                        } catch (\Exception $e) {
+                            Log::warning('Erro ao converter data de inclusão: ' . $e->getMessage());
+                            $dataInclusao = null;
+                        }
+
+                        try {
+                            $dataPublicacao = !empty($licitacao['dataPublicacaoPncp']) ? Carbon::parse($licitacao['dataPublicacaoPncp']) : null;
+                        } catch (\Exception $e) {
+                            Log::warning('Erro ao converter data de publicação: ' . $e->getMessage());
+                            $dataPublicacao = null;
+                        }
+
+                        try {
+                            $dataAbertura = !empty($licitacao['dataAberturaProposta']) ? Carbon::parse($licitacao['dataAberturaProposta']) : null;
+                        } catch (\Exception $e) {
+                            Log::warning('Erro ao converter data de abertura: ' . $e->getMessage());
+                            $dataAbertura = null;
+                        }
+
+                        try {
+                            $dataEncerramento = !empty($licitacao['dataEncerramentoProposta']) ? Carbon::parse($licitacao['dataEncerramentoProposta']) : null;
+                        } catch (\Exception $e) {
+                            Log::warning('Erro ao converter data de encerramento: ' . $e->getMessage());
+                            $dataEncerramento = null;
+                        }
+
+                        // Valor total estimado com tratamento de erro
+                        $valorTotalEstimado = 0;
+                        if (isset($licitacao['valorTotalEstimado']) && is_numeric($licitacao['valorTotalEstimado'])) {
+                            $valorTotalEstimado = $licitacao['valorTotalEstimado'];
+                        }
+
+                        // Log detalhado dos dados que serão inseridos
+                        Log::info('Dados para inserção: ' . json_encode([
+                            'numero_controle_pncp' => $numeroControle,
+                            'orgao_entidade' => $orgao,
+                            'unidade_orgao' => $unidade,
+                            'uf' => $uf,
+                            'valor_total_estimado' => $valorTotalEstimado
+                        ]));
+
+                        // Tentativa de inserção
+                        $novaLicitacao = new Licitacao();
+                        $novaLicitacao->numero_controle_pncp = $numeroControle;
+                        $novaLicitacao->orgao_entidade = $orgao;
+                        $novaLicitacao->unidade_orgao = $unidade;
+                        $novaLicitacao->ano_compra = $licitacao['anoCompra'] ?? 0;
+                        $novaLicitacao->sequencial_compra = $licitacao['sequencialCompra'] ?? 0;
+                        $novaLicitacao->numero_compra = $licitacao['numeroCompra'] ?? '';
+                        $novaLicitacao->objeto_compra = $licitacao['objetoCompra'] ?? '';
+                        $novaLicitacao->modalidade_nome = $licitacao['modalidadeNome'] ?? '';
+                        $novaLicitacao->modo_disputa_nome = $licitacao['modoDisputaNome'] ?? '';
+                        $novaLicitacao->valor_total_estimado = $valorTotalEstimado;
+                        $novaLicitacao->situacao_compra_nome = $licitacao['situacaoCompraNome'] ?? '';
+                        $novaLicitacao->data_inclusao = $dataInclusao;
+                        $novaLicitacao->data_publicacao_pncp = $dataPublicacao;
+                        $novaLicitacao->data_abertura_proposta = $dataAbertura;
+                        $novaLicitacao->data_encerramento_proposta = $dataEncerramento;
+                        $novaLicitacao->link_sistema_origem = $licitacao['linkSistemaOrigem'] ?? '';
+                        $novaLicitacao->is_srp = $licitacao['srp'] ?? false;
+                        $novaLicitacao->uf = $uf;
+                        $novaLicitacao->municipio = $municipio;
+                        $novaLicitacao->cnpj = $cnpj;
+                        $novaLicitacao->analisada = false;
+                        $novaLicitacao->interesse = false;
+
+                        $resultado = $novaLicitacao->save();
+
+                        if ($resultado) {
+                            $contador++;
+                            Log::info('Licitação salva com sucesso. ID: ' . $novaLicitacao->id);
+                        } else {
+                            Log::warning('Falha ao salvar a licitação: ' . $numeroControle);
+                        }
+                    } else {
+                        Log::info('Licitação já existe: ' . $numeroControle);
+                    }
+                } catch (Exception $e) {
+                    Log::error('Erro ao processar licitação: ' . $e->getMessage());
+                    Log::error('Dados da licitação que causou erro: ' . json_encode($licitacao));
+                    // Continua para a próxima licitação mesmo se houver erro
+                    continue;
+                }
+            }
+
+            // Commit da transação
+            DB::commit();
+            Log::info('Transação concluída com sucesso. Licitações processadas: ' . $contador);
+
+            return $contador;
+
+        } catch (Exception $e) {
+            // Rollback em caso de erro
+            DB::rollBack();
+
+            Log::error('Erro durante a transação: ' . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Analisa a relevância das licitações para segmentos cadastrados
+     *
+     * @param array|null $licitacaoIds IDs específicos de licitações para analisar
+     * @return array Resultado da análise
+     */
     public function analisarRelevanciaLicitacoes($licitacaoIds = null)
     {
         try {
@@ -123,9 +274,11 @@ class PncpApiService
             }
 
             $licitacoes = $query->get();
-            $segmentos = Segmento::all();
+            $segmentos = \App\Models\Segmento::all();
 
             Log::info('Analisando ' . $licitacoes->count() . ' licitações para ' . $segmentos->count() . ' segmentos');
+
+            $contador = 0;
 
             // Para cada licitação, analisar relevância para todos os segmentos
             foreach ($licitacoes as $licitacao) {
@@ -135,25 +288,47 @@ class PncpApiService
                     // Limpar associações anteriores se existirem
                     $licitacao->segmentos()->detach();
 
-                    // Analisar relevância para cada segmento
-                    $licitacao->analisarRelevancia($segmentos);
+                    // Verificar relevância para cada segmento
+                    foreach ($segmentos as $segmento) {
+                        $texto = strtolower($licitacao->objeto_compra . ' ' . $licitacao->orgao_entidade);
+                        $relevancia = 0;
+
+                        // Verificar palavras-chave do segmento no texto da licitação
+                        if (method_exists($segmento, 'getPalavrasChaveAttribute')) {
+                            $palavrasChave = $segmento->palavras_chave;
+
+                            foreach ($palavrasChave as $palavra) {
+                                if (strpos($texto, strtolower($palavra)) !== false) {
+                                    $relevancia++;
+                                }
+                            }
+                        }
+
+                        // Se tem relevância, associar segmento à licitação
+                        if ($relevancia > 0) {
+                            $licitacao->segmentos()->attach($segmento->id, ['relevancia' => $relevancia]);
+                        }
+                    }
 
                     // Marcar licitação como analisada
                     $licitacao->analisada = true;
                     $licitacao->save();
 
+                    $contador++;
                     DB::commit();
-                    Log::info('Licitação ID ' . $licitacao->id . ' analisada com sucesso');
+
                 } catch (\Exception $e) {
                     DB::rollBack();
                     Log::error('Erro ao analisar licitação ID ' . $licitacao->id . ': ' . $e->getMessage());
                 }
             }
 
+            Log::info('Análise de relevância concluída: ' . $contador . ' licitações analisadas');
+
             return [
                 'success' => true,
-                'message' => 'Análise de relevância concluída para ' . $licitacoes->count() . ' licitações',
-                'total_analisadas' => $licitacoes->count()
+                'message' => 'Análise de relevância concluída',
+                'total_analisadas' => $contador
             ];
 
         } catch (Exception $e) {
@@ -163,15 +338,30 @@ class PncpApiService
             return [
                 'success' => false,
                 'message' => 'Erro ao analisar relevância: ' . $e->getMessage(),
+                'total_analisadas' => 0
             ];
         }
     }
 
-    // Método para enviar alertas de novas licitações relevantes
+    /**
+     * Envia alertas de novas licitações relevantes para usuários
+     *
+     * @return array Resultado do envio de alertas
+     */
     public function enviarAlertasLicitacoes()
     {
         try {
             Log::info('Iniciando envio de alertas de licitações');
+
+            // Verificar se existe o modelo Alerta
+            if (!class_exists('\\App\\Models\\Alerta')) {
+                Log::warning('Modelo Alerta não encontrado. Pulando envio de alertas.');
+                return [
+                    'success' => false,
+                    'message' => 'Modelo Alerta não encontrado',
+                    'total_enviados' => 0
+                ];
+            }
 
             // Buscar licitações recentes relevantes
             $licitacoesRecentes = Licitacao::where('data_inclusao', '>=', Carbon::now()->subDays(1))
@@ -195,16 +385,16 @@ class PncpApiService
                 // Enviar alerta para cada usuário
                 foreach ($usuarios as $usuario) {
                     // Verificar limite de alertas do plano
-                    $plano = $usuario->licenca->plano;
+                    if (method_exists($usuario, 'hasRecurso')) {
+                        // Se não tem alertas ilimitados, verificar limite
+                        if (!$usuario->hasRecurso('alertas_ilimitados')) {
+                            $alertasEnviados = \App\Models\Alerta::where('user_id', $usuario->id)
+                                ->whereMonth('created_at', now()->month)
+                                ->count();
 
-                    // Se plano básico pessoa física, verificar limite
-                    if ($plano->isPessoaFisica() && $plano->tier === 'basico') {
-                        $alertasEnviados = \App\Models\Alerta::where('user_id', $usuario->id)
-                            ->whereMonth('created_at', now()->month)
-                            ->count();
-
-                        if ($alertasEnviados >= 10) {
-                            continue; // Limite atingido
+                            if ($alertasEnviados >= 10) {
+                                continue; // Limite atingido
+                            }
                         }
                     }
 
@@ -235,6 +425,7 @@ class PncpApiService
             return [
                 'success' => false,
                 'message' => 'Erro ao enviar alertas: ' . $e->getMessage(),
+                'total_enviados' => 0
             ];
         }
     }
